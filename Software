@@ -1,0 +1,90 @@
+#python3
+from flask import Flask, render_template, request, jsonify
+from textblob import TextBlob
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
+import cv2
+from fer import FER
+import androidhelper  # For mobile notifications (requires Android)
+
+app = Flask(__name__)
+droid = androidhelper.Android()
+
+# Load pre-trained chatbot model
+model_name = "microsoft/DialoGPT-medium"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForCausalLM.from_pretrained(model_name)
+
+def analyze_sentiment(text):
+    if not text.strip():
+        return "neutral"
+    blob = TextBlob(text)
+    polarity = blob.sentiment.polarity
+    if polarity > 0.2:
+        return "positive"
+    elif polarity < -0.2:
+        return "negative"
+    else:
+        return "neutral"
+
+def generate_ai_response(user_input):
+    inputs = tokenizer.encode(user_input + " <|endoftext|>", return_tensors="pt")
+    response_ids = model.generate(inputs, max_length=100, pad_token_id=tokenizer.eos_token_id)
+    response = tokenizer.decode(response_ids[:, inputs.shape[-1]:][0], skip_special_tokens=True)
+    return response if response.strip() else "I'm here to listen. Tell me more."
+
+def detect_facial_expression():
+    detector = FER()
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        return "neutral"
+    ret, frame = cap.read()
+    cap.release()
+    if ret and frame is not None:
+        emotion, score = detector.top_emotion(frame)
+        return emotion if emotion else "neutral"
+    return "neutral"
+
+def fetch_mobile_notifications():
+    notifications = droid.getRecentNotifications().result
+    messages = [n["text"] for n in notifications if "text" in n]
+    return messages if messages else []
+
+def analyze_notifications():
+    messages = fetch_mobile_notifications()
+    emotional_messages = []
+    for msg in messages:
+        sentiment = analyze_sentiment(msg)
+        if sentiment in ["negative", "neutral"]:
+            emotional_messages.append((msg, sentiment))
+    return emotional_messages
+
+def respond_to_notifications():
+    notifications = analyze_notifications()
+    responses = {}
+    for msg, sentiment in notifications:
+        response = generate_ai_response(f"{msg}. Emotion detected: {sentiment}")
+        responses[msg] = response
+    return responses
+
+@app.route("/")
+def home():
+    return render_template("index.html")
+
+@app.route("/chat", methods=["POST"])
+def chat():
+    user_input = request.json.get("message", "").strip()
+    if not user_input:
+        return jsonify({"response": "I didn't catch that. Could you say more?"})
+    sentiment = analyze_sentiment(user_input)
+    facial_expression = detect_facial_expression()
+    ai_response = generate_ai_response(f"{user_input}. Emotion detected: {facial_expression}")
+    return jsonify({"response": ai_response})
+
+@app.route("/notifications", methods=["GET"])
+def notifications():
+    responses = respond_to_notifications()
+    return jsonify({"responses": responses})
+
+if __name__ == "__main__":
+    app.run(debug=True, host='0.0.0.0', port=5000)
